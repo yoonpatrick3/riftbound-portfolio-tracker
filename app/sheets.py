@@ -57,7 +57,7 @@ class SheetStore:
                 name=name,
                 asset_type=str(row.get("Type", "")).strip(),
                 quantity=max(1, int(float(row.get("Quantity") or 1))),
-                cost_basis=float(row.get("Cost Basis") or 0),
+                cost_basis=_money(row.get("Cost Basis")),
                 active=active,
                 pricing_source=pricing_source,
                 pricing_key=str(row.get("Pricing Key", "")).strip(),
@@ -108,3 +108,8 @@ class SheetStore:
             result.sales_count_30d,
             result.notes,
         ], value_input_option="USER_ENTERED")
+
+def _money(value) -> float:
+    if value in (None, ""): return 0.0
+    if isinstance(value, (int, float)): return float(value)
+    return float(str(value).strip().replace("$", "").replace(",", "") or 0)

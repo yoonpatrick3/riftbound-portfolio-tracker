@@ -1,4 +1,6 @@
 import re
+import time
+import random
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -106,14 +108,25 @@ class TcggoPricingProvider:
         return self._unwrap_single(detail), resolved
 
     def _get_json(self, path: str, params: Optional[dict] = None) -> Any:
-        response = requests.get(
-            f"{self.base_url}{path}",
-            headers=self.headers,
-            params=params,
-            timeout=30,
-        )
-        response.raise_for_status()
-        return response.json()
+        url = f"{self.base_url}{path}"
+        last_response = None
+        for attempt in range(6):
+            time.sleep(1.25)
+            response = requests.get(url, headers=self.headers, params=params, timeout=30)
+            last_response = response
+            if response.status_code == 429:
+                try:
+                    delay = float(response.headers.get("Retry-After") or min(30, 2 ** (attempt + 1)))
+                except (TypeError, ValueError):
+                    delay = min(30, 2 ** (attempt + 1))
+                time.sleep(delay + random.uniform(0, 0.5))
+                continue
+            if 500 <= response.status_code < 600 and attempt < 5:
+                time.sleep(min(20, 2 ** (attempt + 1)))
+                continue
+            response.raise_for_status()
+            return response.json()
+        last_response.raise_for_status()
 
     @staticmethod
     def _unwrap_single(payload: Any) -> dict:
@@ -191,10 +204,16 @@ class TcggoPricingProvider:
         choices = [
             (self._num(tcg.get("market_price")), "TCGGO / TCGplayer market"),
             (self._num(tcg.get("market")), "TCGGO / TCGplayer market"),
+            (self._num(tcg.get("price")), "TCGGO / TCGplayer price"),
+            (self._num(tcg.get("total")), "TCGGO / TCGplayer product total"),
             (self._num(cardmarket.get("lowest_near_mint")), "TCGGO / Cardmarket NM"),
+            (self._num(cardmarket.get("price")), "TCGGO / Cardmarket price"),
+            (self._num(cardmarket.get("total")), "TCGGO / Cardmarket product total"),
             (self._num(cardmarket.get("trend_price")), "TCGGO / Cardmarket trend"),
             (self._num(cardmarket.get("trend")), "TCGGO / Cardmarket trend"),
+            (self._num(cardmarket.get("7d_average")), "TCGGO / Cardmarket 7d average"),
             (self._num(cardmarket.get("avg_7d")), "TCGGO / Cardmarket 7d average"),
+            (self._num(cardmarket.get("30d_average")), "TCGGO / Cardmarket 30d average"),
             (self._num(cardmarket.get("avg_30d")), "TCGGO / Cardmarket 30d average"),
         ]
         for value, note in choices:
@@ -244,7 +263,7 @@ class TcggoPricingProvider:
     def _extract_average(self, item: dict, days: int) -> Optional[float]:
         prices = item.get("prices") or {}
         cm = prices.get("cardmarket") or {}
-        return self._num(cm.get(f"avg_{days}d"))
+        return self._num(cm.get(f"{days}d_average") or cm.get(f"avg_{days}d"))
 
     def _extract_median_30d(self, asset: Asset, item: dict) -> Optional[float]:
         grade = self._grade(asset.asset_type)
@@ -252,7 +271,7 @@ class TcggoPricingProvider:
             return self._graded_value(item.get("prices") or {}, grade)
         prices = item.get("prices") or {}
         cm = prices.get("cardmarket") or {}
-        return self._num(cm.get("avg_30d"))
+        return self._num(cm.get("30d_average") or cm.get("avg_30d"))
 
     @staticmethod
     def _is_product(asset: Asset) -> bool:

@@ -36,7 +36,7 @@ def run():
 
     if failures:
         summary = "; ".join(f"{name}: {error}" for name, error in failures)
-        raise RuntimeError(f"{len(failures)} assets failed: {summary}")
+        log.warning("%d assets were left unpriced this run: %s", len(failures), summary)
 
 
 if __name__ == "__main__":
