@@ -1,4 +1,6 @@
 from datetime import datetime, timezone
+import re
+import unicodedata
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -35,23 +37,73 @@ class SheetStore:
         self._history_last_row = 1
 
     def load_assets(self) -> list[Asset]:
+        """Load active assets and auto-fill script-managed input metadata.
+
+        For a new row the user only needs to provide:
+          - Asset
+          - Type
+          - Quantity
+          - Cost Basis
+
+        The script generates/persists Asset ID, Active, Pricing Source and eBay
+        Query. Pricing Key remains blank until TCGGO resolves an exact item, at
+        which point update_asset_price() persists it automatically.
+        """
         rows = self.assets_ws.get_all_records(expected_headers=ASSET_HEADERS)
         assets = []
 
+        used_ids = {
+            str(row.get("Asset ID", "")).strip()
+            for row in rows
+            if str(row.get("Asset ID", "")).strip()
+        }
+
         for idx, row in enumerate(rows, start=2):
-            active_raw = str(row.get("Active", "")).strip().lower()
-            active = active_raw in {"yes", "y", "true", "1"}
-            if not active:
+            name = str(row.get("Asset", "")).strip()
+            if not name:
                 continue
 
             asset_id = str(row.get("Asset ID", "")).strip()
-            name = str(row.get("Asset", "")).strip()
-            if not asset_id or not name:
+            if not asset_id:
+                asset_id = _unique_slug(name, used_ids)
+                used_ids.add(asset_id)
+                self.assets_ws.update(
+                    range_name=f"A{idx}",
+                    values=[[asset_id]],
+                    value_input_option="USER_ENTERED",
+                )
+
+            active_raw = str(row.get("Active", "")).strip().lower()
+            if not active_raw:
+                active = True
+                self.assets_ws.update(
+                    range_name=f"F{idx}",
+                    values=[["Yes"]],
+                    value_input_option="USER_ENTERED",
+                )
+            else:
+                active = active_raw in {"yes", "y", "true", "1"}
+
+            if not active:
                 continue
 
             pricing_source = str(row.get("Pricing Source", "")).strip().upper()
             if not pricing_source:
                 pricing_source = "TCGGO"
+                self.assets_ws.update(
+                    range_name=f"G{idx}",
+                    values=[[pricing_source]],
+                    value_input_option="USER_ENTERED",
+                )
+
+            ebay_query = str(row.get("eBay Query", "")).strip()
+            if not ebay_query:
+                ebay_query = _default_ebay_query(name)
+                self.assets_ws.update(
+                    range_name=f"I{idx}",
+                    values=[[ebay_query]],
+                    value_input_option="USER_ENTERED",
+                )
 
             assets.append(Asset(
                 row_number=idx,
@@ -63,7 +115,7 @@ class SheetStore:
                 active=active,
                 pricing_source=pricing_source,
                 pricing_key=str(row.get("Pricing Key", "")).strip(),
-                ebay_query=str(row.get("eBay Query", "")).strip(),
+                ebay_query=ebay_query,
             ))
 
         return assets
@@ -162,6 +214,29 @@ class SheetStore:
             asset_id = str(row[2]).strip()
             if day and asset_id:
                 self._history_row_by_key[(day, asset_id)] = row_number
+
+
+def _default_ebay_query(name: str) -> str:
+    """Create a useful Riftbound-first eBay query for newly entered assets."""
+    cleaned = " ".join(name.split())
+    lowered = cleaned.lower()
+    if lowered.startswith("riftbound ") or lowered.startswith("pokemon "):
+        return cleaned
+    return f"Riftbound {cleaned}"
+
+
+def _unique_slug(name: str, used_ids: set[str]) -> str:
+    normalized = unicodedata.normalize("NFKD", name)
+    ascii_name = normalized.encode("ascii", "ignore").decode("ascii").lower()
+    base = re.sub(r"[^a-z0-9]+", "-", ascii_name).strip("-") or "asset"
+
+    if base not in used_ids:
+        return base
+
+    suffix = 2
+    while f"{base}-{suffix}" in used_ids:
+        suffix += 1
+    return f"{base}-{suffix}"
 
 
 def _money(value) -> float:
