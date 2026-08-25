@@ -78,9 +78,6 @@ class EbaySoldPricingProvider:
                 return self._price_sold(asset)
             except Exception as exc:
                 sold_error = exc
-                # Marketplace Insights access is commonly unavailable to normal
-                # developer apps. Once its OAuth scope is rejected, do not retry
-                # that token request for every asset in the same weekly run.
                 text = str(exc)
                 if any(marker in text.lower() for marker in (
                     "invalid_scope", "insufficient_scope", "marketplace.insights",
@@ -247,9 +244,6 @@ class EbaySoldPricingProvider:
         grade = re.search(r"\b(PSA|BGS|CGC)\s*([0-9]+(?:\.[0-9]+)?)\b", original, re.I)
         collector = re.search(r"\b[A-Z]{2,5}-?\d+[A-Za-z]?/\d+\b", original, re.I)
 
-        # Derive a compact subject from the asset name. This helps when an eBay
-        # seller omits subtitles like "Fire Below the Mountain" or words such
-        # as "Overnumbered" from the listing title.
         subject = re.sub(r"\b(PSA|BGS|CGC)\s*[0-9]+(?:\.[0-9]+)?\b", " ", asset.name, flags=re.I)
         subject = re.sub(
             r"\b(overnumbered|sealed|raw|card|promo|green|alt|art|on)\b",
@@ -267,7 +261,22 @@ class EbaySoldPricingProvider:
         if subject:
             variants.append(f"Riftbound {subject} {grade_text}".strip())
 
-        # Preserve order while removing duplicates.
+        # Gold-stamp promos are often listed without role/subtitle words such as
+        # "Leader" or without the word "Promo". Keep Gold Stamp + grade in the
+        # search so we broaden safely without mixing in unrelated slabs.
+        if re.search(r"\bgold\s+stamp\b", original, re.I):
+            compact = re.sub(r"\b(PSA|BGS|CGC)\s*[0-9]+(?:\.[0-9]+)?\b", " ", asset.name, flags=re.I)
+            compact = re.sub(
+                r"\b(leader|ascetic|promo|card|sealed|raw)\b",
+                " ",
+                compact,
+                flags=re.I,
+            )
+            compact = re.sub(r"\bgold\s+stamp\b", " ", compact, flags=re.I)
+            compact = " ".join(compact.split())
+            if compact:
+                variants.append(f"Riftbound {compact} Gold Stamp {grade_text}".strip())
+
         unique = []
         seen = set()
         for value in variants:
@@ -297,7 +306,6 @@ class EbaySoldPricingProvider:
         elif title_grade:
             return False
 
-        # If a collector number is in the query and title, require it to match.
         qnum = re.search(r"\b[a-z]{2,5}\s*\d+[a-z]?\s*\d+\b", query_norm)
         tnum = re.search(r"\b[a-z]{2,5}\s*\d+[a-z]?\s*\d+\b", title_norm)
         if qnum and tnum and qnum.group(0) != tnum.group(0):
@@ -318,7 +326,7 @@ class EbaySoldPricingProvider:
             return True
 
         overlap = len(wanted & found)
-        required = max(1, (len(wanted) + 1) // 2)
+        required = max(2, (len(wanted) + 1) // 2)
         return overlap >= min(required, len(wanted))
 
     @staticmethod
@@ -343,25 +351,26 @@ class EbaySoldPricingProvider:
         return trimmed or ordered
 
     @staticmethod
+    def _short_error(error: Optional[Exception]) -> str:
+        if error is None:
+            return "unknown error"
+        text = str(error).strip() or error.__class__.__name__
+        return text[:180]
+
+    @staticmethod
     def _oauth_error(response: requests.Response) -> str:
         try:
             payload = response.json()
             if isinstance(payload, dict):
                 return str(
                     payload.get("error_description")
+                    or payload.get("message")
                     or payload.get("error")
                     or payload
                 )[:220]
-        except Exception:
+        except ValueError:
             pass
-        return (response.text or response.reason or "OAuth error").strip()[:220]
-
-    @staticmethod
-    def _short_error(error: Optional[Exception]) -> str:
-        if error is None:
-            return "unknown error"
-        text = str(error).strip() or error.__class__.__name__
-        return text[:180]
+        return (response.text or response.reason or "unknown OAuth error")[:220]
 
 
 def _normalize(text: str) -> str:
