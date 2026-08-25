@@ -87,6 +87,19 @@ class SheetStore:
             value_input_option="USER_ENTERED",
         )
 
+    def mark_asset_unpriced(self, asset: Asset, error: Exception) -> None:
+        """Clear stale valuation output when an asset cannot be priced this run."""
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        message = str(error).strip() or error.__class__.__name__
+        if len(message) > 450:
+            message = message[:447] + "..."
+
+        self.assets_ws.update(
+            range_name=f"K{asset.row_number}:O{asset.row_number}",
+            values=[["", "", "", now, f"UNPRICED — {message}"]],
+            value_input_option="USER_ENTERED",
+        )
+
     def append_snapshot(self, asset: Asset, result: PriceResult) -> None:
         now = datetime.now(timezone.utc)
         unit = round(result.estimated_value, 2)
@@ -109,7 +122,10 @@ class SheetStore:
             result.notes,
         ], value_input_option="USER_ENTERED")
 
+
 def _money(value) -> float:
-    if value in (None, ""): return 0.0
-    if isinstance(value, (int, float)): return float(value)
+    if value in (None, ""):
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
     return float(str(value).strip().replace("$", "").replace(",", "") or 0)
