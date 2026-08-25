@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from statistics import mean, median
 import base64
 import re
+import time
 from typing import Optional
 
 import requests
@@ -33,10 +34,16 @@ class EbaySoldPricingProvider:
         self.client_secret = client_secret
         self.marketplace_id = marketplace_id
         self.category_id = category_id
+        self._token_cache: dict[str, tuple[str, float]] = {}
+        self._sold_unavailable_reason: Optional[str] = None
 
     def _token(self, scope: str) -> str:
         if not self.client_id or not self.client_secret:
             raise RuntimeError("eBay credentials are not configured")
+
+        cached = self._token_cache.get(scope)
+        if cached and cached[1] > time.time() + 60:
+            return cached[0]
 
         basic = base64.b64encode(f"{self.client_id}:{self.client_secret}".encode()).decode()
         response = requests.post(
@@ -48,16 +55,38 @@ class EbaySoldPricingProvider:
             data={"grant_type": "client_credentials", "scope": scope},
             timeout=30,
         )
-        response.raise_for_status()
-        return response.json()["access_token"]
+
+        if not response.ok:
+            detail = self._oauth_error(response)
+            raise RuntimeError(
+                f"eBay OAuth token request failed ({response.status_code}: {detail})"
+            )
+
+        payload = response.json()
+        token = payload["access_token"]
+        expires_in = int(payload.get("expires_in") or 7200)
+        self._token_cache[scope] = (token, time.time() + expires_in)
+        return token
 
     def price(self, asset: Asset) -> PriceResult:
         sold_error: Optional[Exception] = None
 
-        try:
-            return self._price_sold(asset)
-        except Exception as exc:
-            sold_error = exc
+        if self._sold_unavailable_reason:
+            sold_error = RuntimeError(self._sold_unavailable_reason)
+        else:
+            try:
+                return self._price_sold(asset)
+            except Exception as exc:
+                sold_error = exc
+                # Marketplace Insights access is commonly unavailable to normal
+                # developer apps. Once its OAuth scope is rejected, do not retry
+                # that token request for every asset in the same weekly run.
+                text = str(exc)
+                if any(marker in text.lower() for marker in (
+                    "invalid_scope", "insufficient_scope", "marketplace.insights",
+                    "oauth token request failed (400",
+                )):
+                    self._sold_unavailable_reason = self._short_error(exc)
 
         try:
             result = self._price_active(asset)
@@ -142,51 +171,59 @@ class EbaySoldPricingProvider:
         )
 
     def _price_active(self, asset: Asset) -> PriceResult:
-        query = asset.ebay_query or asset.name
+        token = self._token(BASIC_SCOPE)
+        all_comps: list[float] = []
+        matched_query: Optional[str] = None
 
-        response = requests.get(
-            BROWSE_SEARCH_URL,
-            headers={
-                "Authorization": f"Bearer {self._token(BASIC_SCOPE)}",
-                "X-EBAY-C-MARKETPLACE-ID": self.marketplace_id,
-            },
-            params={
-                "q": query,
-                "category_ids": self.category_id,
-                "filter": "buyingOptions:{FIXED_PRICE}",
-                "limit": 50,
-            },
-            timeout=30,
-        )
-        response.raise_for_status()
+        for query in self._query_variants(asset):
+            response = requests.get(
+                BROWSE_SEARCH_URL,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "X-EBAY-C-MARKETPLACE-ID": self.marketplace_id,
+                },
+                params={
+                    "q": query,
+                    "category_ids": self.category_id,
+                    "filter": "buyingOptions:{FIXED_PRICE}",
+                    "limit": 50,
+                },
+                timeout=30,
+            )
+            response.raise_for_status()
 
-        items = response.json().get("itemSummaries") or []
-        comps = []
+            comps = []
+            for item in response.json().get("itemSummaries") or []:
+                title = str(item.get("title") or "")
+                if not self._title_match(query, title):
+                    continue
 
-        for item in items:
-            title = str(item.get("title") or "")
-            if not self._title_match(query, title):
-                continue
+                price_node = item.get("price") or {}
+                value = price_node.get("value")
+                currency = price_node.get("currency")
+                if value is None or currency != "USD":
+                    continue
 
-            price_node = item.get("price") or {}
-            value = price_node.get("value")
-            currency = price_node.get("currency")
-            if value is None or currency != "USD":
-                continue
+                try:
+                    numeric = float(value)
+                except (TypeError, ValueError):
+                    continue
 
-            try:
-                numeric = float(value)
-            except (TypeError, ValueError):
-                continue
+                if numeric > 0:
+                    comps.append(numeric)
 
-            if numeric > 0:
-                comps.append(numeric)
+            if comps:
+                all_comps = comps
+                matched_query = query
+                break
 
-        if not comps:
-            raise LookupError(f"No matching fixed-price eBay listings found for {query!r}")
+        if not all_comps:
+            attempted = "; ".join(self._query_variants(asset))
+            raise LookupError(f"No matching fixed-price eBay listings found; tried: {attempted}")
 
-        filtered = self._trim_outliers(comps)
+        filtered = self._trim_outliers(all_comps)
         med = median(filtered)
+        query_note = f"; query={matched_query!r}" if matched_query else ""
 
         return PriceResult(
             source="EBAY_ACTIVE",
@@ -195,9 +232,50 @@ class EbaySoldPricingProvider:
             high_30d=max(filtered),
             notes=(
                 f"Median asking price of {len(filtered)} matching fixed-price "
-                "eBay US listings (not sold comps)"
+                f"eBay US listings (not sold comps){query_note}"
             ),
         )
+
+    @staticmethod
+    def _query_variants(asset: Asset) -> list[str]:
+        original = (asset.ebay_query or asset.name).strip()
+        variants = [original]
+
+        if asset.name.strip() and asset.name.strip().lower() != original.lower():
+            variants.append(asset.name.strip())
+
+        grade = re.search(r"\b(PSA|BGS|CGC)\s*([0-9]+(?:\.[0-9]+)?)\b", original, re.I)
+        collector = re.search(r"\b[A-Z]{2,5}-?\d+[A-Za-z]?/\d+\b", original, re.I)
+
+        # Derive a compact subject from the asset name. This helps when an eBay
+        # seller omits subtitles like "Fire Below the Mountain" or words such
+        # as "Overnumbered" from the listing title.
+        subject = re.sub(r"\b(PSA|BGS|CGC)\s*[0-9]+(?:\.[0-9]+)?\b", " ", asset.name, flags=re.I)
+        subject = re.sub(
+            r"\b(overnumbered|sealed|raw|card|promo|green|alt|art|on)\b",
+            " ",
+            subject,
+            flags=re.I,
+        )
+        subject = " ".join(subject.split())
+
+        grade_text = grade.group(0).upper() if grade else ""
+        collector_text = collector.group(0).upper() if collector else ""
+
+        if subject and collector_text:
+            variants.append(f"Riftbound {subject} {collector_text} {grade_text}".strip())
+        if subject:
+            variants.append(f"Riftbound {subject} {grade_text}".strip())
+
+        # Preserve order while removing duplicates.
+        unique = []
+        seen = set()
+        for value in variants:
+            normalized = value.strip().lower()
+            if value.strip() and normalized not in seen:
+                seen.add(normalized)
+                unique.append(value.strip())
+        return unique
 
     @staticmethod
     def _title_match(query: str, title: str) -> bool:
@@ -219,13 +297,20 @@ class EbaySoldPricingProvider:
         elif title_grade:
             return False
 
+        # If a collector number is in the query and title, require it to match.
+        qnum = re.search(r"\b[a-z]{2,5}\s*\d+[a-z]?\s*\d+\b", query_norm)
+        tnum = re.search(r"\b[a-z]{2,5}\s*\d+[a-z]?\s*\d+\b", title_norm)
+        if qnum and tnum and qnum.group(0) != tnum.group(0):
+            return False
+
         stop = {
             "riftbound", "pokemon", "card", "cards", "sealed",
-            "official", "tcg", "the", "and", "for",
+            "official", "tcg", "the", "and", "for", "overnumbered",
+            "promo", "edition",
         }
         wanted = {
             token for token in query_norm.split()
-            if len(token) >= 3 and token not in stop
+            if len(token) >= 3 and token not in stop and not token.isdigit()
         }
         found = set(title_norm.split())
 
@@ -233,7 +318,7 @@ class EbaySoldPricingProvider:
             return True
 
         overlap = len(wanted & found)
-        required = max(2, (len(wanted) + 1) // 2)
+        required = max(1, (len(wanted) + 1) // 2)
         return overlap >= min(required, len(wanted))
 
     @staticmethod
@@ -256,6 +341,20 @@ class EbaySoldPricingProvider:
         high = q3 + 1.5 * iqr
         trimmed = [value for value in ordered if low <= value <= high]
         return trimmed or ordered
+
+    @staticmethod
+    def _oauth_error(response: requests.Response) -> str:
+        try:
+            payload = response.json()
+            if isinstance(payload, dict):
+                return str(
+                    payload.get("error_description")
+                    or payload.get("error")
+                    or payload
+                )[:220]
+        except Exception:
+            pass
+        return (response.text or response.reason or "OAuth error").strip()[:220]
 
     @staticmethod
     def _short_error(error: Optional[Exception]) -> str:
