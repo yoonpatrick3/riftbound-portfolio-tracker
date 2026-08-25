@@ -126,6 +126,7 @@ class EbaySoldPricingProvider:
         payload = response.json()
         items = payload.get("itemSales") or payload.get("itemSummaries") or []
         comps = []
+        exclude_signature = self._exclude_signature(asset)
 
         for item in items:
             price_node = item.get("price") or item.get("lastSoldPrice") or {}
@@ -135,6 +136,8 @@ class EbaySoldPricingProvider:
                 continue
 
             title = str(item.get("title") or "")
+            if exclude_signature and self._is_signature_listing(title):
+                continue
             if not self._title_match(query, title):
                 continue
 
@@ -171,6 +174,7 @@ class EbaySoldPricingProvider:
         token = self._token(BASIC_SCOPE)
         all_comps: list[float] = []
         matched_query: Optional[str] = None
+        exclude_signature = self._exclude_signature(asset)
 
         for query in self._query_variants(asset):
             response = requests.get(
@@ -192,6 +196,8 @@ class EbaySoldPricingProvider:
             comps = []
             for item in response.json().get("itemSummaries") or []:
                 title = str(item.get("title") or "")
+                if exclude_signature and self._is_signature_listing(title):
+                    continue
                 if not self._title_match(query, title):
                     continue
 
@@ -221,6 +227,7 @@ class EbaySoldPricingProvider:
         filtered = self._trim_outliers(all_comps)
         med = median(filtered)
         query_note = f"; query={matched_query!r}" if matched_query else ""
+        signature_note = "; signature listings excluded" if exclude_signature else ""
 
         return PriceResult(
             source="EBAY_ACTIVE",
@@ -229,7 +236,7 @@ class EbaySoldPricingProvider:
             high_30d=max(filtered),
             notes=(
                 f"Median asking price of {len(filtered)} matching fixed-price "
-                f"eBay US listings (not sold comps){query_note}"
+                f"eBay US listings (not sold comps){query_note}{signature_note}"
             ),
         )
 
@@ -246,7 +253,7 @@ class EbaySoldPricingProvider:
 
         subject = re.sub(r"\b(PSA|BGS|CGC)\s*[0-9]+(?:\.[0-9]+)?\b", " ", asset.name, flags=re.I)
         subject = re.sub(
-            r"\b(overnumbered|sealed|raw|card|promo|green|alt|art|on)\b",
+            r"\b(overnumbered|overnumber|sealed|raw|card|promo|green|alt|art|on)\b",
             " ",
             subject,
             flags=re.I,
@@ -287,6 +294,22 @@ class EbaySoldPricingProvider:
         return unique
 
     @staticmethod
+    def _exclude_signature(asset: Asset) -> bool:
+        """Exclude signature variants for ordinary overnumbered assets.
+
+        This is asset-driven instead of query-driven so the protection remains
+        active even when a fallback query drops the word 'Overnumbered'.
+        """
+        text = f"{asset.name} {asset.ebay_query}".lower()
+        is_overnumbered = bool(re.search(r"\bovernumber(?:ed)?\b", text))
+        is_signature_asset = bool(re.search(r"\bsignature\b", text))
+        return is_overnumbered and not is_signature_asset
+
+    @staticmethod
+    def _is_signature_listing(title: str) -> bool:
+        return bool(re.search(r"\bsignature\b", _normalize(title)))
+
+    @staticmethod
     def _title_match(query: str, title: str) -> bool:
         query_norm = _normalize(query)
         title_norm = _normalize(title)
@@ -314,7 +337,7 @@ class EbaySoldPricingProvider:
         stop = {
             "riftbound", "pokemon", "card", "cards", "sealed",
             "official", "tcg", "the", "and", "for", "overnumbered",
-            "promo", "edition",
+            "overnumber", "promo", "edition",
         }
         wanted = {
             token for token in query_norm.split()
