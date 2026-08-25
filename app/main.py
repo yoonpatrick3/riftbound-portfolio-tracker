@@ -31,6 +31,10 @@ def run():
         except Exception as exc:
             failures.append((asset.name, str(exc)))
             log.exception("Failed pricing %s", asset.name)
+            try:
+                store.mark_asset_unpriced(asset, exc)
+            except Exception:
+                log.exception("Failed marking %s as unpriced", asset.name)
 
     log.info("Finished: %d succeeded, %d failed", successes, len(failures))
 
