@@ -21,25 +21,33 @@ class PricingRouter:
         source = (asset.pricing_source or "TCGGO").upper()
 
         if source == "TCGGO":
-            return self.tcggo.price(asset)
-
-        if source == "EBAY_SOLD":
-            # Try TCGGO first. It already exposes eBay graded medians for many
-            # catalogued slabs, avoiding direct eBay credentials when possible.
             try:
-                result = self.tcggo.price(asset)
-                result.notes = f"{result.notes}; EBAY_SOLD row satisfied by TCGGO"
-                return result
+                return self.tcggo.price(asset)
             except Exception as tcggo_error:
                 try:
-                    return self.ebay.price(asset)
+                    result = self.ebay.price(asset)
+                    result.notes = (
+                        f"{result.notes}; TCGGO fallback reason: "
+                        f"{self._short_error(tcggo_error)}"
+                    )
+                    return result
                 except Exception as ebay_error:
                     raise RuntimeError(
-                        f"TCGGO fallback failed ({tcggo_error}); "
-                        f"direct eBay sold lookup failed ({ebay_error})"
+                        f"TCGGO lookup failed ({self._short_error(tcggo_error)}); "
+                        f"eBay fallback failed ({self._short_error(ebay_error)})"
                     ) from ebay_error
+
+        if source == "EBAY_SOLD":
+            # Explicit eBay rows go straight to eBay. The provider prefers sold
+            # history when available and otherwise uses active fixed-price comps.
+            return self.ebay.price(asset)
 
         raise ValueError(
             f"Unsupported Pricing Source {source!r} for {asset.name}. "
-            "V2 supports TCGGO and EBAY_SOLD only."
+            "Supported sources: TCGGO and EBAY_SOLD."
         )
+
+    @staticmethod
+    def _short_error(error: Exception) -> str:
+        text = str(error).strip() or error.__class__.__name__
+        return text[:220]
