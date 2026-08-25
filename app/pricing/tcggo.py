@@ -75,8 +75,6 @@ class TcggoPricingProvider:
                 raise ValueError(f"{asset.name}: unsupported Pricing Key kind {kind!r}")
             return PricingKey(game, kind, value.strip())
 
-        # Missing key: search automatically. Sealed assets search products;
-        # everything else searches cards.
         query = asset.ebay_query or asset.name
         return PricingKey("riftbound", "search", query)
 
@@ -86,7 +84,6 @@ class TcggoPricingProvider:
             data = self._get_json(f"/{key.game}/{endpoint}/{key.value}")
             return self._unwrap_single(data), None
 
-        # Search keys decide cards vs products using the asset type/name.
         is_product = self._is_product(asset)
         endpoint = "products" if is_product else "cards"
         payload = self._get_json(
@@ -102,7 +99,6 @@ class TcggoPricingProvider:
         if item_id is None:
             raise LookupError(f"{asset.name}: TCGGO match had no numeric id")
 
-        # Fetch full detail because search results may have abbreviated prices.
         detail = self._get_json(f"/{key.game}/{endpoint}/{item_id}")
         resolved = f"{key.game}:{'product' if is_product else 'card'}:{item_id}"
         return self._unwrap_single(detail), resolved
@@ -164,12 +160,10 @@ class TcggoPricingProvider:
             elif wanted_number and wanted_number.lower() in card_number.lower():
                 score += 80
 
-            # Useful for things like "ON Jinx" where API name is "Jinx, Loose Cannon".
             for token in wanted_name.split():
                 if len(token) >= 3 and token in name:
                     score += 5
 
-            # Prefer candidates carrying a price payload.
             if candidate.get("prices"):
                 score += 2
 
@@ -177,8 +171,6 @@ class TcggoPricingProvider:
 
         scored.sort(key=lambda x: x[0], reverse=True)
         best_score, best = scored[0]
-
-        # A search result with no meaningful overlap is too risky to auto-price.
         if best_score <= 0:
             raise LookupError(
                 f"{asset.name}: TCGGO search was ambiguous; add an exact Pricing Key"
@@ -193,7 +185,6 @@ class TcggoPricingProvider:
             graded_value = self._graded_value(prices, grade)
             if graded_value is not None:
                 return graded_value, f"TCGGO eBay graded median ({grade[0].upper()} {grade[1]})"
-
             raise ValueError(
                 f"{asset.name}: TCGGO returned no graded price for {grade[0].upper()} {grade[1]}"
             )
@@ -201,6 +192,9 @@ class TcggoPricingProvider:
         tcg = prices.get("tcg_player") or prices.get("tcgplayer") or {}
         cardmarket = prices.get("cardmarket") or {}
 
+        # Prefer current US/current listing-style prices. Historical averages can
+        # be badly distorted on thinly traded chase cards, so raw singles do not
+        # use 7d/30d averages as their valuation fallback.
         choices = [
             (self._num(tcg.get("market_price")), "TCGGO / TCGplayer market"),
             (self._num(tcg.get("market")), "TCGGO / TCGplayer market"),
@@ -211,28 +205,29 @@ class TcggoPricingProvider:
             (self._num(cardmarket.get("total")), "TCGGO / Cardmarket product total"),
             (self._num(cardmarket.get("trend_price")), "TCGGO / Cardmarket trend"),
             (self._num(cardmarket.get("trend")), "TCGGO / Cardmarket trend"),
-            (self._num(cardmarket.get("7d_average")), "TCGGO / Cardmarket 7d average"),
-            (self._num(cardmarket.get("avg_7d")), "TCGGO / Cardmarket 7d average"),
-            (self._num(cardmarket.get("30d_average")), "TCGGO / Cardmarket 30d average"),
-            (self._num(cardmarket.get("avg_30d")), "TCGGO / Cardmarket 30d average"),
         ]
+
+        if self._is_product(asset):
+            choices.extend([
+                (self._num(cardmarket.get("7d_average")), "TCGGO / Cardmarket 7d average"),
+                (self._num(cardmarket.get("avg_7d")), "TCGGO / Cardmarket 7d average"),
+                (self._num(cardmarket.get("30d_average")), "TCGGO / Cardmarket 30d average"),
+                (self._num(cardmarket.get("avg_30d")), "TCGGO / Cardmarket 30d average"),
+            ])
+
         for value, note in choices:
             if value is not None and value > 0:
                 return value, note
 
-        # Some product responses expose a simpler top-level price object.
         for key in ("market_price", "price", "lowest_near_mint"):
             value = self._num(prices.get(key))
             if value is not None and value > 0:
                 return value, f"TCGGO product price ({key})"
 
-        raise ValueError(f"{asset.name}: TCGGO returned no usable automatic price")
+        raise ValueError(f"{asset.name}: TCGGO returned no reliable automatic price")
 
     def _graded_value(self, prices: dict, grade: tuple[str, str]) -> Optional[float]:
         company, number = grade
-
-        # Documented TCGGO shape:
-        # prices.ebay.graded.psa.10.median_price
         ebay = prices.get("ebay") or {}
         graded = ebay.get("graded") or prices.get("graded") or prices.get("graded_prices") or {}
         company_node = graded.get(company) or graded.get(company.upper()) or {}
@@ -245,7 +240,6 @@ class TcggoPricingProvider:
                     if value is not None:
                         return value
             return self._num(node)
-
         return None
 
     def _extract_last_sold(self, asset: Asset, item: dict) -> Optional[float]:
@@ -287,7 +281,6 @@ class TcggoPricingProvider:
 
     @staticmethod
     def _collector_number(text: str) -> Optional[str]:
-        # Riftbound forms like OGN-304/298 or VEN-190/166.
         match = re.search(r"\b[A-Z]{2,5}-?\d+[A-Za-z]?/\d+\b", text, re.I)
         if match:
             return match.group(0)
@@ -296,7 +289,7 @@ class TcggoPricingProvider:
     @staticmethod
     def _normalize_name(text: str) -> str:
         text = text.lower().replace("'", "")
-        text = re.sub(r"\bon\b", " ", text)  # shorthand for Overnumbered
+        text = re.sub(r"\bon\b", " ", text)
         text = re.sub(r"\bpsa\s*\d+(?:\.\d+)?\b", " ", text)
         text = re.sub(r"[^a-z0-9]+", " ", text)
         return " ".join(text.split())
