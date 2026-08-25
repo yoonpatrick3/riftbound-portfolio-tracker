@@ -31,6 +31,8 @@ class SheetStore:
         self.book = gspread.authorize(creds).open_by_key(spreadsheet_id)
         self.assets_ws = self.book.worksheet(ASSET_SHEET)
         self.history_ws = self.book.worksheet(HISTORY_SHEET)
+        self._history_row_by_key: dict[tuple[str, str], int] | None = None
+        self._history_last_row = 1
 
     def load_assets(self) -> list[Asset]:
         rows = self.assets_ws.get_all_records(expected_headers=ASSET_HEADERS)
@@ -101,12 +103,17 @@ class SheetStore:
         )
 
     def append_snapshot(self, asset: Asset, result: PriceResult) -> None:
-        now = datetime.now(timezone.utc)
-        unit = round(result.estimated_value, 2)
+        """Write one history row per asset per UTC day.
 
-        self.history_ws.append_row([
+        Re-running the workflow on the same day updates that asset's existing
+        row instead of appending another testing duplicate.
+        """
+        now = datetime.now(timezone.utc)
+        day = now.date().isoformat()
+        unit = round(result.estimated_value, 2)
+        row_values = [
             now.isoformat(timespec="seconds"),
-            now.date().isoformat(),
+            day,
             asset.asset_id,
             asset.name,
             result.source,
@@ -120,7 +127,41 @@ class SheetStore:
             result.high_30d,
             result.sales_count_30d,
             result.notes,
-        ], value_input_option="USER_ENTERED")
+        ]
+
+        self._ensure_history_index()
+        key = (day, asset.asset_id)
+        existing_row = self._history_row_by_key.get(key)
+
+        if existing_row:
+            self.history_ws.update(
+                range_name=f"A{existing_row}:O{existing_row}",
+                values=[row_values],
+                value_input_option="USER_ENTERED",
+            )
+            return
+
+        self.history_ws.append_row(row_values, value_input_option="USER_ENTERED")
+        self._history_last_row += 1
+        self._history_row_by_key[key] = self._history_last_row
+
+    def _ensure_history_index(self) -> None:
+        if self._history_row_by_key is not None:
+            return
+
+        values = self.history_ws.get_all_values()
+        self._history_last_row = max(1, len(values))
+        self._history_row_by_key = {}
+
+        # Column B = Week/day; Column C = Asset ID. If historical testing has
+        # already produced duplicates, use the latest one and stop creating more.
+        for row_number, row in enumerate(values[1:], start=2):
+            if len(row) < 3:
+                continue
+            day = str(row[1]).strip()
+            asset_id = str(row[2]).strip()
+            if day and asset_id:
+                self._history_row_by_key[(day, asset_id)] = row_number
 
 
 def _money(value) -> float:
