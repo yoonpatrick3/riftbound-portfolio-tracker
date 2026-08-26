@@ -6,9 +6,11 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 from .models import Asset, PriceResult
+from .sales.mercari import MercariSale
 
 ASSET_SHEET = "Tracking Assets"
 HISTORY_SHEET = "Price History"
+SALES_SHEET = "Sales"
 
 # Manual Value is retained in the sheet only for backwards compatibility with
 # the existing workbook. V2 never reads or prices from it.
@@ -25,6 +27,12 @@ HISTORY_HEADERS = [
     "Low 30d", "High 30d", "Sales Count 30d", "Notes"
 ]
 
+SALES_HEADERS = [
+    "Marketplace", "Transaction ID", "Item", "Sold At", "Gross Sale",
+    "Selling Fee", "Shipping Fee", "Net Earnings", "Buyer", "Status",
+    "Paid At", "Gmail Message ID", "Notes", "Last Synced",
+]
+
 
 class SheetStore:
     def __init__(self, spreadsheet_id: str, service_account_info: dict):
@@ -33,8 +41,67 @@ class SheetStore:
         self.book = gspread.authorize(creds).open_by_key(spreadsheet_id)
         self.assets_ws = self.book.worksheet(ASSET_SHEET)
         self.history_ws = self.book.worksheet(HISTORY_SHEET)
+        self.sales_ws = self._get_or_create_sales_sheet()
         self._history_row_by_key: dict[tuple[str, str], int] | None = None
         self._history_last_row = 1
+
+    def _get_or_create_sales_sheet(self):
+        try:
+            worksheet = self.book.worksheet(SALES_SHEET)
+        except gspread.WorksheetNotFound:
+            worksheet = self.book.add_worksheet(
+                title=SALES_SHEET, rows=1000, cols=len(SALES_HEADERS)
+            )
+            worksheet.append_row(SALES_HEADERS, value_input_option="USER_ENTERED")
+        return worksheet
+
+    def upsert_sales(self, sales: list[MercariSale]) -> None:
+        """Insert or update Mercari sales, keyed by immutable transaction ID."""
+        values = self.sales_ws.get_all_values()
+        if not values:
+            self.sales_ws.append_row(SALES_HEADERS, value_input_option="USER_ENTERED")
+            values = [SALES_HEADERS]
+        elif values[0] != SALES_HEADERS:
+            raise RuntimeError(
+                f"{SALES_SHEET} headers do not match expected columns: {SALES_HEADERS}"
+            )
+
+        row_by_key = {}
+        for row_number, row in enumerate(values[1:], start=2):
+            marketplace = row[0].strip() if len(row) > 0 else ""
+            transaction_id = row[1].strip() if len(row) > 1 else ""
+            if marketplace and transaction_id:
+                row_by_key[(marketplace, transaction_id)] = row_number
+
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        for sale in sales:
+            row = [
+                "Mercari",
+                sale.transaction_id,
+                sale.item,
+                sale.sold_at,
+                sale.gross_price,
+                sale.selling_fee,
+                sale.shipping_fee,
+                sale.earnings,
+                sale.buyer,
+                sale.status,
+                sale.paid_at,
+                sale.gmail_message_id,
+                sale.notes,
+                now,
+            ]
+            key = ("Mercari", sale.transaction_id)
+            row_number = row_by_key.get(key)
+            if row_number:
+                self.sales_ws.update(
+                    range_name=f"A{row_number}:N{row_number}",
+                    values=[row],
+                    value_input_option="USER_ENTERED",
+                )
+            else:
+                self.sales_ws.append_row(row, value_input_option="USER_ENTERED")
+                row_by_key[key] = len(row_by_key) + 2
 
     def load_assets(self) -> list[Asset]:
         """Load active assets and auto-fill script-managed input metadata.
