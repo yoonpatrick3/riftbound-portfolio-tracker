@@ -3,6 +3,7 @@ from dotenv import load_dotenv
 
 from .config import load_config
 from .sheets import SheetStore
+from .sales.mercari import GmailMercariClient
 from .valuation import PricingRouter
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -14,6 +15,18 @@ def run():
     cfg = load_config()
     store = SheetStore(cfg.google_sheet_id, cfg.google_service_account)
     router = PricingRouter(cfg)
+
+    mercari = GmailMercariClient(
+        cfg.gmail_client_id,
+        cfg.gmail_client_secret,
+        cfg.gmail_refresh_token,
+    )
+    if mercari.enabled:
+        sales = mercari.fetch_sales(cfg.mercari_lookback_days)
+        store.upsert_sales(sales)
+        log.info("Synced %d Mercari sales", len(sales))
+    else:
+        log.info("Mercari sync disabled: Gmail OAuth secrets are not configured")
 
     assets = store.load_assets()
     log.info("Pricing %d active assets", len(assets))
