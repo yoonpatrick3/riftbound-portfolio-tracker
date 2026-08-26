@@ -2,6 +2,10 @@
 
 Automatic weekly portfolio pricing from your Google Sheet.
 
+The weekly workflow also imports Mercari sales from Gmail into a deduplicated
+`Sales` worksheet. It records transaction ID, item, sale date, gross price,
+fees, net earnings, buyer, and lifecycle status through `PAID`.
+
 ## Pricing sources
 
 - `TCGGO` — primary source for Riftbound, Pokémon, sealed products, raw cards, and supported graded prices.
@@ -37,6 +41,23 @@ Optional eBay fallback:
 EBAY_CLIENT_ID
 EBAY_CLIENT_SECRET
 ```
+
+Optional Mercari automation:
+
+```text
+GMAIL_CLIENT_ID
+GMAIL_CLIENT_SECRET
+GMAIL_REFRESH_TOKEN
+```
+
+Create a Google OAuth client with the Gmail read-only scope, generate a refresh
+token for the Gmail account that receives Mercari notifications, and store the
+three values as GitHub repository secrets. If they are absent, pricing still
+runs and Mercari synchronization is skipped.
+
+Mercari bundle emails expose the bundle total but not the individual cards.
+Those rows are flagged in `Notes` so their contents can be reconciled from the
+Mercari sales report without inventing inventory changes.
 
 ## First run
 
