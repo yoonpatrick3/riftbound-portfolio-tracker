@@ -31,4 +31,8 @@ jobs:
           EBAY_CLIENT_SECRET: ${{ secrets.EBAY_CLIENT_SECRET }}
           EBAY_MARKETPLACE_ID: EBAY_US
           EBAY_CATEGORY_ID: "183454"
+          GMAIL_CLIENT_ID: ${{ secrets.GMAIL_CLIENT_ID }}
+          GMAIL_CLIENT_SECRET: ${{ secrets.GMAIL_CLIENT_SECRET }}
+          GMAIL_REFRESH_TOKEN: ${{ secrets.GMAIL_REFRESH_TOKEN }}
+          MERCARI_LOOKBACK_DAYS: "365"
         run: python -m app.main
