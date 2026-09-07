@@ -22,9 +22,15 @@ def run():
         cfg.gmail_refresh_token,
     )
     if mercari.enabled:
-        sales = mercari.fetch_sales(cfg.mercari_lookback_days)
-        store.upsert_sales(sales)
-        log.info("Synced %d Mercari sales", len(sales))
+        try:
+            sales = mercari.fetch_sales(cfg.mercari_lookback_days)
+            store.upsert_sales(sales)
+            log.info("Synced %d Mercari sales", len(sales))
+        except Exception as exc:
+            # Sales syncing is optional. A revoked/expired Gmail OAuth token or
+            # temporary Gmail API problem must not prevent the portfolio from
+            # receiving its weekly pricing snapshot.
+            log.warning("Mercari sync failed; continuing with portfolio pricing: %s", exc)
     else:
         log.info("Mercari sync disabled: Gmail OAuth secrets are not configured")
 
