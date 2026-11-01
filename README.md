@@ -72,3 +72,5 @@ Mercari sales report without inventing inventory changes.
 You edit columns A:I (except Pricing Key can auto-resolve). `Manual Value` is ignored and can remain blank. The script owns K:O.
 
 When you sell an asset, set `Active = No`; do not delete the row.
+
+<!-- Maintenance: keep the weekly portfolio snapshot repository active. -->
